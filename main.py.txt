@@ -1,0 +1,59 @@
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import List, Dict
+from transformers import pipeline
+import nest_asyncio
+import uvicorn
+
+# Apply async fix for Jupyter
+nest_asyncio.apply()
+
+# Initialize FastAPI app
+app = FastAPI()
+
+# Load specific models
+summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
+sentiment_analyzer = pipeline("sentiment-analysis", model="distilbert/distilbert-base-uncased-finetuned-sst-2-english")
+keyword_extractor = pipeline("ner", model="dbmdz/bert-large-cased-finetuned-conll03-english", grouped_entities=True)
+
+# In-memory history storage
+history: List[Dict] = []
+
+# Define request model
+class TextInput(BaseModel):
+    text: str
+    task: str  # "summarize", "sentiment", "keywords"
+
+# POST endpoint
+@app.post("/process")
+async def process_text(payload: TextInput):
+    text = payload.text.strip()
+    task = payload.task.lower()
+
+    if not text:
+        raise HTTPException(status_code=400, detail="Input text cannot be empty.")
+    if task not in ["summarize", "sentiment", "keywords"]:
+        raise HTTPException(status_code=400, detail="Invalid task. Choose from: summarize, sentiment, keywords.")
+
+    try:
+        if task == "summarize":
+            summary = summarizer(text, max_length=130, min_length=30, do_sample=False)[0]['summary_text']
+            result = {"task": task, "result": summary}
+        elif task == "sentiment":
+            sentiment = sentiment_analyzer(text)[0]
+            result = {"task": task, "result": sentiment}
+        elif task == "keywords":
+            entities = keyword_extractor(text)
+            keywords = list(set([ent['word'] for ent in entities]))
+            result = {"task": task, "result": keywords}
+
+        history.append({"text": text, **result})
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing text: {str(e)}")
+
+# GET endpoint
+@app.get("/history")
+async def get_history():
+    return {"history": history}
